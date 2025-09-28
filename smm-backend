@@ -1,0 +1,493 @@
+# SMM Panel — Full Starter (Frontend + Demo Backend)
+
+This single file contains everything you need to run a **local demo** of the SMM Panel: a lightweight **Express + SQLite** backend and a **React (Vite)** frontend (the enhanced UI from earlier).
+
+---
+
+## Project structure (what you'll create)
+
+```
+/smm-panel-starter
+  /server
+    package.json
+    server.js
+    db.sqlite (created at runtime)
+  /client
+    package.json
+    vite.config.js
+    index.html
+    src/main.jsx
+    src/App.jsx        <-- updated SMM Panel React UI (calls API)
+    src/styles.css
+```
+
+---
+
+## 1) Backend — server/server.js (Node + Express + sqlite3)
+
+Create a folder `server`, then create `package.json` and `server.js` as below.
+
+### server/package.json
+
+```json
+{
+  "name": "smm-panel-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "body-parser": "^1.20.2",
+    "shortid": "^2.2.16"
+  }
+}
+```
+
+### server/server.js
+
+```js
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const path = require('path');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const shortid = require('shortid');
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+const DB_FILE = path.join(__dirname, 'db.sqlite');
+const db = new sqlite3.Database(DB_FILE);
+
+// Initialize DB
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS services (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    price_per_unit REAL,
+    min_qty INTEGER,
+    max_qty INTEGER,
+    active INTEGER DEFAULT 1
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    service_id TEXT,
+    quantity INTEGER,
+    total_price REAL,
+    link TEXT,
+    status TEXT,
+    created_at TEXT
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS wallet (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    balance REAL DEFAULT 0
+  )`);
+
+  // Ensure one wallet row
+  db.get(`SELECT COUNT(*) as c FROM wallet`, (err, row) => {
+    if (err) return console.error(err);
+    if (row.c === 0) db.run(`INSERT INTO wallet(balance) VALUES(125.5)`);
+  });
+
+  // Seed services if empty
+  db.get(`SELECT COUNT(*) as c FROM services`, (err, row) => {
+    if (err) return console.error(err);
+    if (row.c === 0) {
+      const insert = db.prepare(`INSERT INTO services(id,name,price_per_unit,min_qty,max_qty,active) VALUES(?,?,?,?,?,?)`);
+      insert.run(shortid.generate(), 'Instagram Likes', 0.007, 10, 10000, 1);
+      insert.run(shortid.generate(), 'YouTube Views', 0.004, 100, 1000000, 1);
+      insert.finalize();
+    }
+  });
+});
+
+// Routes
+app.get('/api/services', (req, res) => {
+  db.all(`SELECT * FROM services WHERE active = 1`, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/services', (req, res) => {
+  const { name, price_per_unit, min_qty, max_qty } = req.body;
+  const id = shortid.generate();
+  db.run(`INSERT INTO services(id,name,price_per_unit,min_qty,max_qty,active) VALUES(?,?,?,?,?,1)`,
+    [id, name, price_per_unit, min_qty, max_qty], function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ id, name, price_per_unit, min_qty, max_qty });
+    });
+});
+
+app.get('/api/orders', (req, res) => {
+  db.all(`SELECT * FROM orders ORDER BY created_at DESC LIMIT 50`, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/orders', (req, res) => {
+  const { service_id, quantity, link } = req.body;
+  if (!service_id || !quantity) return res.status(400).json({ error: 'service_id and quantity required' });
+
+  db.get(`SELECT * FROM services WHERE id = ?`, [service_id], (err, service) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!service) return res.status(404).json({ error: 'service not found' });
+    if (quantity < service.min_qty || quantity > service.max_qty) {
+      return res.status(400).json({ error: `quantity must be between ${service.min_qty} and ${service.max_qty}` });
+    }
+
+    const total = +(quantity * service.price_per_unit).toFixed(4);
+    const id = shortid.generate();
+    const created_at = new Date().toISOString();
+    db.run(`INSERT INTO orders(id,service_id,quantity,total_price,link,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+      [id, service_id, quantity, total, link || '', 'Processing', created_at], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        // Simulate async provider fulfillment: after 3s set to completed
+        setTimeout(() => {
+          db.run(`UPDATE orders SET status = 'Completed' WHERE id = ?`, [id]);
+        }, 3000);
+
+        res.json({ id, service_id, quantity, total_price: total, status: 'Processing', created_at });
+      });
+  });
+});
+
+app.post('/api/wallet/topup', (req, res) => {
+  const { amount } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'invalid amount' });
+  db.run(`UPDATE wallet SET balance = balance + ? WHERE id = 1`, [amount], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    db.get(`SELECT balance FROM wallet WHERE id = 1`, (err, row) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ balance: row.balance });
+    });
+  });
+});
+
+app.get('/api/wallet', (req, res) => {
+  db.get(`SELECT balance FROM wallet WHERE id = 1`, (err, row) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ balance: row.balance });
+  });
+});
+
+// Serve static (if you build client into server/public)
+app.use(express.static(path.join(__dirname, 'public')));
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
+```
+
+---
+
+## 2) Frontend (Vite + React) — client/src/App.jsx
+
+Create a Vite React app inside `client/` (or paste these files into your existing React project). Below are the minimal files.
+
+### client/package.json
+
+```json
+{
+  "name": "smm-panel-client",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "framer-motion": "^10.12.8",
+    "lucide-react": "^0.268.0"
+  },
+  "devDependencies": {
+    "vite": "^5.1.0"
+  }
+}
+```
+
+### client/index.html
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SMM Panel</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+```
+
+### client/src/main.jsx
+
+```jsx
+import React from 'react'
+import { createRoot } from 'react-dom/client'
+import App from './App'
+import './styles.css'
+
+createRoot(document.getElementById('root')).render(<App />)
+```
+
+### client/src/App.jsx
+
+> This React component is the enhanced UI (Framer Motion + Lucide). It now calls the demo backend at `http://localhost:4000` for services, orders, and wallet.
+
+```jsx
+import React, { useEffect, useState } from 'react'
+import { motion } from 'framer-motion'
+import { PlusCircle, TrendingUp, Wallet, Settings, X } from 'lucide-react'
+
+const API = import.meta.env.VITE_API_URL || 'http://localhost:4000'
+
+export default function App(){
+  const [balance, setBalance] = useState(0)
+  const [services, setServices] = useState([])
+  const [orders, setOrders] = useState([])
+  const [showCreate, setShowCreate] = useState(false)
+  const [newService, setNewService] = useState({ name: '', pricePerUnit: '', min: '', max: '' })
+  const [placing, setPlacing] = useState(false)
+
+  useEffect(()=>{ fetchWallet(); fetchServices(); fetchOrders(); }, [])
+
+  async function fetchWallet(){
+    const res = await fetch(`${API}/api/wallet`)
+    const data = await res.json()
+    setBalance(data.balance || 0)
+  }
+  async function fetchServices(){
+    const res = await fetch(`${API}/api/services`)
+    setServices(await res.json())
+  }
+  async function fetchOrders(){
+    const res = await fetch(`${API}/api/orders`)
+    setOrders(await res.json())
+  }
+
+  async function topUp(){
+    const amount = 25
+    const res = await fetch(`${API}/api/wallet/topup`, { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ amount }) })
+    const data = await res.json()
+    setBalance(data.balance)
+  }
+
+  async function createService(e){
+    e.preventDefault()
+    const payload = { name: newService.name, price_per_unit: parseFloat(newService.pricePerUnit), min_qty: parseInt(newService.min), max_qty: parseInt(newService.max) }
+    await fetch(`${API}/api/services`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
+    setNewService({ name: '', pricePerUnit: '', min: '', max: '' })
+    setShowCreate(false)
+    fetchServices()
+  }
+
+  async function placeOrder(serviceId){
+    const qty = services.find(s=>s.id===serviceId)?.min || 10
+    setPlacing(true)
+    const res = await fetch(`${API}/api/orders`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service_id: serviceId, quantity: qty }) })
+    const data = await res.json()
+    setPlacing(false)
+    fetchOrders()
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-slate-100 to-slate-200 p-6 font-sans">
+      <motion.header initial={{ y: -40, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ duration: 0.5 }} className="max-w-6xl mx-auto flex items-center justify-between mb-6">
+        <div className="flex items-center gap-4">
+          <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 120 }} className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-pink-500 flex items-center justify-center text-white text-xl font-bold shadow-lg">S</motion.div>
+          <div>
+            <h1 className="text-3xl font-bold text-slate-800">SMM Panel</h1>
+            <p className="text-sm text-slate-500">Manage services, orders, balance and analytics</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="text-right">
+            <div className="text-sm text-slate-500 flex items-center gap-1"><Wallet size={14}/> Balance</div>
+            <div className="text-lg font-semibold">${balance.toFixed(2)}</div>
+          </div>
+          <button onClick={topUp} className="px-4 py-2 bg-indigo-600 text-white rounded-xl shadow hover:bg-indigo-700 transition">Top Up</button>
+        </div>
+      </motion.header>
+
+      <main className="max-w-6xl mx-auto grid grid-cols-12 gap-6">
+        <section className="col-span-12 lg:col-span-4 space-y-6">
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="p-5 bg-white rounded-2xl shadow-xl">
+            <h2 className="font-semibold text-lg mb-3 flex items-center gap-2"><PlusCircle size={18}/> Quick Actions</h2>
+            <div className="flex flex-col gap-3">
+              <button onClick={() => setShowCreate(true)} className="w-full py-2 rounded-lg border border-dashed border-indigo-200 hover:bg-indigo-50 transition">Create Service</button>
+              <button className="w-full py-2 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition">View Reports</button>
+              <button className="w-full py-2 rounded-lg bg-yellow-50 text-yellow-700 hover:bg-yellow-100 transition">API Keys</button>
+            </div>
+          </motion.div>
+
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="p-5 bg-white rounded-2xl shadow-xl">
+            <h2 className="font-semibold text-lg mb-3 flex items-center gap-2"><TrendingUp size={18}/> Active Services</h2>
+            <ul className="space-y-3">
+              {services.map(s => (
+                <li key={s.id} className="flex items-center justify-between">
+                  <div>
+                    <div className="font-semibold">{s.name}</div>
+                    <div className="text-xs text-slate-400">Min: {s.min_qty} • Max: {s.max_qty} • ${s.price_per_unit}/unit</div>
+                  </div>
+                  <div className='flex gap-2 items-center'>
+                    <button onClick={()=>placeOrder(s.id)} disabled={placing} className="px-3 py-1 text-sm rounded bg-indigo-50 hover:bg-indigo-100">Order</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        </section>
+
+        <section className="col-span-12 lg:col-span-8 space-y-6">
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className="p-5 bg-white rounded-2xl shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold">Recent Orders</h2>
+              <div className="text-sm text-slate-500">Latest 50</div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left table-auto">
+                <thead>
+                  <tr className="text-sm text-slate-500 border-b">
+                    <th className="py-2">ID</th>
+                    <th>Service</th>
+                    <th>Qty</th>
+                    <th>Price</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orders.map(o => (
+                    <tr key={o.id} className="border-b hover:bg-slate-50 transition">
+                      <td className="py-3 text-sm text-slate-600">#{o.id}</td>
+                      <td className="py-3">{services.find(s=>s.id===o.service_id)?.name || '—'}</td>
+                      <td className="py-3 text-sm">{o.quantity}</td>
+                      <td className="py-3 text-sm">${o.total_price}</td>
+                      <td className="py-3 text-sm font-medium text-slate-700">{o.status}</td>
+                      <td className="py-3 text-right">
+                        <div className="flex gap-2 justify-end">
+                          <button onClick={()=>fetchOrders()} className="text-xs px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100">Refresh</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </motion.div>
+
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="p-5 bg-white rounded-2xl shadow-xl">
+            <h2 className="text-lg font-semibold mb-2 flex items-center gap-2"><Settings size={18}/> Activity Feed</h2>
+            <ul className="text-sm text-slate-600 space-y-2 list-disc list-inside">
+              <li>Order placed and processed asynchronously by demo backend.</li>
+              <li>Use the Top Up button to add demo funds to your wallet.</li>
+            </ul>
+          </motion.div>
+        </section>
+      </main>
+
+      {showCreate && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <motion.form initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ duration: 0.3 }} onSubmit={createService} className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Create New Service</h3>
+              <button type="button" onClick={()=>setShowCreate(false)} className="text-slate-500 hover:text-slate-700"><X size={20}/></button>
+            </div>
+            <div className="space-y-3">
+              <label className="block">
+                <div className="text-sm text-slate-600">Service name</div>
+                <input value={newService.name} onChange={(e)=>setNewService({...newService,name:e.target.value})} className="w-full mt-1 p-2 border rounded" required />
+              </label>
+              <label className="block">
+                <div className="text-sm text-slate-600">Price per unit (USD)</div>
+                <input value={newService.pricePerUnit} onChange={(e)=>setNewService({...newService,pricePerUnit:e.target.value})} className="w-full mt-1 p-2 border rounded" required />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label>
+                  <div className="text-sm text-slate-600">Min</div>
+                  <input value={newService.min} onChange={(e)=>setNewService({...newService,min:e.target.value})} className="w-full mt-1 p-2 border rounded" required />
+                </label>
+                <label>
+                  <div className="text-sm text-slate-600">Max</div>
+                  <input value={newService.max} onChange={(e)=>setNewService({...newService,max:e.target.value})} className="w-full mt-1 p-2 border rounded" required />
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={()=>setShowCreate(false)} className="px-4 py-2 rounded hover:bg-slate-100">Cancel</button>
+              <button type="submit" className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">Create</button>
+            </div>
+          </motion.form>
+        </div>
+      )}
+
+      <footer className="max-w-6xl mx-auto text-center text-xs text-slate-500 mt-8">⚡ SMM Panel • Demo • Do not use for spamming</footer>
+    </div>
+  )
+}
+```
+
+### client/src/styles.css
+
+```css
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+:root{ --bg: #f8fafc }
+body{ font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin:0; background:var(--bg); }
+
+/* small helpers used in component */
+input{ outline:none }
+button{ cursor:pointer }
+```
+
+---
+
+## 3) How to run locally
+
+1. Create folders `server` and `client` and paste the files above.
+2. In `server/` run:
+
+```bash
+cd server
+npm install
+node server.js
+# server will listen on http://localhost:4000
+```
+
+3. In `client/` run:
+
+```bash
+cd client
+npm install
+npm run dev
+# Vite dev server will start (usually http://localhost:5173)
+```
+
+Open browser at the Vite dev URL. The frontend will call the demo backend at http://localhost:4000.
+
+---
+
+## 4) Next steps I can do for you (pick any)
+- Add authentication (JWT + signup/login flow).
+- Switch backend to PostgreSQL + add migrations.
+- Add a worker queue (BullMQ) to dispatch orders to third-party providers.
+- Add payments integration (Stripe / Razorpay) and wallet charge flow.
+- Dockerize the app with a single `docker-compose.yml`.
+
+---
+
+If you want, I can now (a) generate the `server` and `client` files as separate canvas documents, or (b) create a downloadable zip. Which would you prefer?
